@@ -1,65 +1,232 @@
 import logging
+import os
+import json
+import requests
+import random
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, ConversationHandler, MessageHandler, Filters, CallbackQueryHandler
 from telegram.parsemode import ParseMode
-import os
 
-# Enable logging
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
 
 logger = logging.getLogger(__name__)
 
 
-MAIN_MENU, POLL_LIST, HELP, ABOUT = range(4)
+MENU, POLL_LIST, ENTER_URL, ASK_USERNAME, ASK_PASSWORD, SHOW_OPTIONS, VOTE, HELP, ABOUT = range(9)
+
+GATEWAY_URL = "http://localhost:8000/gateway/"
+
+
+# Thanks to https://github.com/RyanRiddle/elgamal ===========
+class PublicKey(object):
+    def __init__(self, p=None, g=None, h=None, iNumBits=256):
+        self.p = p
+        self.g = g
+        self.h = h
+        self.iNumBits = iNumBits
+
+def modexp( base, exp, modulus ):
+        return pow(base, exp, modulus)
+
+def encode(sPlaintext, iNumBits):
+        byte_array = bytearray(sPlaintext, 'utf-16')
+        
+        z = []
+        
+        k = iNumBits//8
+        j = -1 * k
+        for i in range( len(byte_array) ):
+                if i % k == 0:
+                        j += k
+                        z.append(0)
+                z[j//k] += byte_array[i]*(2**(8*(i%k)))
+        
+        return z
+
+def encrypt(key, sPlaintext):
+        z = encode(sPlaintext, key.iNumBits)
+        cipher_pairs = []
+        for i in z:
+                y = random.randint( 0, key.p )
+                c = modexp( key.g, y, key.p )
+                d = (i*modexp( key.h, y, key.p)) % key.p
+                cipher_pairs.append( [c, d] )
+
+        encryptedStr = ""
+        for pair in cipher_pairs:
+                encryptedStr += str(pair[0]) + ' ' + str(pair[1]) + ' '
+    
+        return encryptedStr
+# ==============================================================================
+
+def search_voting_by_id(votings, voting_id):
+    for voting in votings:
+        if voting.get("id") == voting_id:
+            return voting
+
+
+def dont_understand(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text=f"¡Lo siento! No entiendo qué significa {update.message.text}")
 
 
 def start(update, context):
     user = update.message.from_user
     context.bot.send_message(chat_id=update.effective_chat.id, text="¡Bienvenido " + user.first_name + "! Mediante este bot podrás participar fácilmente en las distintas votaciones de la plataforma Decide")
     menu(update, context)
-
-
-def echo(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="¡Lo siento! No entiendo qué significa \"" + update.message.text + "\"")
+    return MENU
 
 
 def menu(update, context):
-    keyboard = [[InlineKeyboardButton("🗳️ Votaciones activas", callback_data='1'),
-                 InlineKeyboardButton("☑️ Mis votaciones", callback_data='2')],
-                [InlineKeyboardButton("❓ Ayuda", callback_data='3'),
-                 InlineKeyboardButton("ℹ️ Acerca del bot", callback_data='4')]]
+    keyboard = [[InlineKeyboardButton("🗳️ Votaciones activas", callback_data=str(POLL_LIST))],
+                [InlineKeyboardButton("🔗 Introducir URL de votación", callback_data=str(ENTER_URL))],
+                [InlineKeyboardButton("❓ Ayuda", url="https://github.com/javdc/decide-telegram-bot/blob/master/README.md"),
+                 InlineKeyboardButton("ℹ️ Acerca del bot", url="https://github.com/javdc/decide-telegram-bot/blob/master/README.md")]]
+    context.bot.send_message(chat_id=update.effective_chat.id, text="🔸 *Menú principal* 🔸", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    return MENU
 
-    update.message.reply_text("🔸 *Menú principal* 🔸", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
-
-def button(update, context):
+def poll_list(update, context):
     query = update.callback_query
+    bot = context.bot
+    
+    votings = json.loads(requests.get(GATEWAY_URL + "voting/?format=json").text)
+    
+    keyboard = [[InlineKeyboardButton(voting.get("name"), callback_data=voting.get("id"))] for voting in votings if voting.get("pub_key") != None and voting.get("end_date") == None]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    bot.edit_message_text(
+        chat_id=query.message.chat_id,
+        message_id=query.message.message_id,
+        text="Selecciona una votación",
+        reply_markup=reply_markup
+    )
+    
+    context.user_data["votings"] = votings
+    
+    return POLL_LIST
 
-    query.edit_message_text(text="Opción seleccionada: {}".format(query.data))
+
+def save_voting_id_by_btn_and_ask_username(update, context):
+    query_data = update.callback_query.data
+    context.user_data["voting_id"] = query_data
+    ask_username(update, context)
+    return ASK_USERNAME
+
+
+def enter_url(update, context):
+    query = update.callback_query
+    query.edit_message_text(text="🔗 Envíame la URL de una votación")
+    return ENTER_URL
+
+
+def save_voting_id_by_url_and_ask_username(update, context):
+    context.user_data["voting_id"] = update.message.text.rstrip('/').split("/")[-1]
+    ask_username(update, context)
+    return ASK_USERNAME
+
+
+def ask_username(update, context):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Necesitas iniciar sesión para poder votar.")
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Introduce tu usuario")
+    return ASK_USERNAME
+
+
+def ask_password(update, context):
+    context.user_data["user"] = update.message.text
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Ahora introduce tu contraseña")
+    return ASK_PASSWORD
+
+
+def show_options(update, context):
+    context.user_data["pass"] = update.message.text
+    
+    login_json = requests.post(GATEWAY_URL + "authentication/login/", data={"username": context.user_data['user'], "password": context.user_data['pass']}).json()
+    token = login_json.get("token")
+    
+    if token == None:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Error al iniciar sesión. Inténtalo de nuevo más tarde.")
+        menu(update, context)
+        return MENU
+    else:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Sesión iniciada correctamente.")
+    
+    context.user_data["token"] = token
+    
+    getuser_json = requests.post(GATEWAY_URL + "authentication/getuser/", data={"token": token}).json()
+    
+    context.user_data["user_id"] = getuser_json.get("id")
+    
+    voting = search_voting_by_id(context.user_data["votings"], int(context.user_data["voting_id"]))
+    
+    if voting.get("pub_key") == None:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Esta votación está cerrada.")
+        menu(update, context)
+        return MENU
+    
+    keyboard = [[InlineKeyboardButton(option.get("option"), callback_data=option.get("number"))] for option in voting.get("question").get("options")]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    context.bot.send_message(chat_id=update.effective_chat.id, text=voting.get("question").get("desc"), reply_markup=reply_markup)
+    
+    context.user_data["pub_key"] = voting.get("pub_key")
+    
+    return SHOW_OPTIONS
+
+
+def vote(update, context):
+    selected_option = update.callback_query.data
+    
+    key = PublicKey(context.user_data["pub_key"].get("p"), context.user_data["pub_key"].get("g"), context.user_data["pub_key"].get("y"))
+    vote_option = encrypt(key, selected_option).split()
+    
+    data_json = json.dumps({"vote":{"a":vote_option[0], "b":vote_option[1]},
+                            "voting":context.user_data["voting_id"],
+                            "voter":context.user_data["user_id"],
+                            "token":context.user_data["token"]})
+    
+    vote_response = requests.post(GATEWAY_URL + "store/", data=data_json, headers={"Authorization":f"Token {context.user_data['token']}", "content-type": "application/json"})
+    
+    if vote_response.status_code == 200:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="¡Tu voto se ha enviado satisfactoriamente!")
+    else:
+        context.bot.send_message(chat_id=update.effective_chat.id, text=f"Error {vote_response.status_code} al enviar el voto. Inténtalo de nuevo más tarde.")
+    
+    menu(update, context)
+    return MENU
 
 
 def main():
-    updater = Updater(token=os.environ["TG_TOKEN"], use_context=True)
+    updater = Updater(token=os.environ['TG_TOKEN'], use_context=True)
     dispatcher = updater.dispatcher
     
-#     conv_handler = ConversationHandler(
-#         entry_points = [CommandHandler('start', start)],
-#         
-#         states = {
-#             POLL_LIST: []
-#         },
-#         
-#         fallbacks = [CommandHandler("menu", menu)]
-#     )
+    conv_handler = ConversationHandler(
+        entry_points = [CommandHandler('menu', menu),
+                        CommandHandler('start', start)],
+         
+        states = {
+            MENU: [CallbackQueryHandler(poll_list, pattern=f"^{str(POLL_LIST)}$"),
+                   CallbackQueryHandler(enter_url, pattern=f"^{str(ENTER_URL)}$")],
+            POLL_LIST: [CallbackQueryHandler(save_voting_id_by_btn_and_ask_username, pattern=f"^\d+$")],
+            ENTER_URL: [MessageHandler(Filters.regex(r'^(http[s]?:\/\/)?[A-Za-z0-9\-]+([.][A-Za-z0-9\-]+)*([:][\d]+)?\/booth\/\d+[/]?$'), save_voting_id_by_url_and_ask_username)],
+            ASK_USERNAME: [MessageHandler(Filters.text, ask_password)],
+            ASK_PASSWORD: [MessageHandler(Filters.text, show_options)],
+            SHOW_OPTIONS: [CallbackQueryHandler(vote, pattern="^\d+$")]
+        },
+        
+        fallbacks = [CommandHandler('menu', menu),
+                     CommandHandler('start', start),
+                     MessageHandler(Filters.text, dont_understand)]
+    )
     
-    dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(MessageHandler(Filters.text, echo))
-    dispatcher.add_handler(CommandHandler('menu', menu))
-    dispatcher.add_handler(CallbackQueryHandler(button))
+    dispatcher.add_handler(conv_handler)
     
     updater.start_polling()
+    
+    updater.idle()
 
     
 if __name__ == '__main__':
