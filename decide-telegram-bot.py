@@ -14,10 +14,15 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 logger = logging.getLogger(__name__)
 
-
 MENU, POLL_LIST, ENTER_URL, ASK_USERNAME, ASK_PASSWORD, SHOW_OPTIONS, VOTE, HELP, ABOUT = range(9)
 
-GATEWAY_URL = "http://localhost:8000/gateway/"
+PORT = int(os.environ.get("PORT", "8443"))
+
+TOKEN = os.environ.get("TG_TOKEN")
+
+APP_URL = os.environ.get("TG_HEROKU_APP_URL", "https://decide-telegram-bot.herokuapp.com/")
+
+GATEWAY_URL = os.environ.get("TG_GATEWAY_URL")
 
 
 # Thanks to https://github.com/RyanRiddle/elgamal ===========
@@ -200,7 +205,7 @@ def vote(update, context):
 
 
 def main():
-    updater = Updater(token=os.environ['TG_TOKEN'], use_context=True)
+    updater = Updater(token=TOKEN, use_context=True)
     dispatcher = updater.dispatcher
     
     conv_handler = ConversationHandler(
@@ -210,7 +215,7 @@ def main():
         states = {
             MENU: [CallbackQueryHandler(poll_list, pattern=f"^{str(POLL_LIST)}$"),
                    CallbackQueryHandler(enter_url, pattern=f"^{str(ENTER_URL)}$")],
-            POLL_LIST: [CallbackQueryHandler(save_voting_id_by_btn_and_ask_username, pattern=f"^\d+$")],
+            POLL_LIST: [CallbackQueryHandler(save_voting_id_by_btn_and_ask_username, pattern="^\d+$")],
             ENTER_URL: [MessageHandler(Filters.regex(r'^(http[s]?:\/\/)?[A-Za-z0-9\-]+([.][A-Za-z0-9\-]+)*([:][\d]+)?\/booth\/\d+[/]?$'), save_voting_id_by_url_and_ask_username)],
             ASK_USERNAME: [MessageHandler(Filters.text, ask_password)],
             ASK_PASSWORD: [MessageHandler(Filters.text, show_options)],
@@ -224,7 +229,9 @@ def main():
     
     dispatcher.add_handler(conv_handler)
     
-    updater.start_polling()
+    updater.start_webhook(listen="0.0.0.0", port=PORT, url_path=TOKEN)
+
+    updater.bot.set_webhook(APP_URL + TOKEN)
     
     updater.idle()
 
