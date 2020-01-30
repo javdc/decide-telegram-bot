@@ -24,10 +24,12 @@ APP_URL = os.environ.get("TG_HEROKU_APP_URL", "https://decide-telegram-bot.herok
 
 GATEWAY_URL = os.environ.get("TG_GATEWAY_URL")
 
+KEYBITS = int(os.environ.get("TG_KEYBITS", "256"))
+
 
 # Thanks to https://github.com/RyanRiddle/elgamal ===========
 class PublicKey(object):
-    def __init__(self, p=None, g=None, h=None, iNumBits=256):
+    def __init__(self, p=None, g=None, h=None, iNumBits=KEYBITS):
         self.p = p
         self.g = g
         self.h = h
@@ -171,28 +173,37 @@ def show_options(update, context):
         menu(update, context)
         return MENU
     
-    keyboard = [[InlineKeyboardButton(option.get("option"), callback_data=option.get("number"))] for option in voting.get("question").get("options")]
+    for party in voting.get("parties"):
+        party_string = ""
+        party_string += f"*{party.get('name')}*\nCandidatos a la presidencia:\n"
+        for candidate in party.get("president_candidates"):
+            party_string += f"{candidate.get('number')}. {candidate.get('president_candidate')}\n"
+        party_string += f"\nCandidatos al congreso:\n"
+        for candidate in party.get("congress_candidates"):
+            party_string += f"{candidate.get('number')}. {candidate.get('congress_candidate')}\n"
+        context.bot.send_message(chat_id=update.effective_chat.id, text=party_string, parse_mode=ParseMode.MARKDOWN)
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    context.bot.send_message(chat_id=update.effective_chat.id, text=voting.get("question").get("desc"), reply_markup=reply_markup)
-    
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Envía los números de los candidatos separados por comas")
+
     context.user_data["pub_key"] = voting.get("pub_key")
     
     return SHOW_OPTIONS
 
 
 def vote(update, context):
-    selected_option = update.callback_query.data
+    selected_options = update.message.text.split(", ")
     
     key = PublicKey(context.user_data["pub_key"].get("p"), context.user_data["pub_key"].get("g"), context.user_data["pub_key"].get("y"))
-    vote_option = encrypt(key, selected_option).split()
     
-    data_json = json.dumps({"vote":{"a":vote_option[0], "b":vote_option[1]},
+    vote_options = [encrypt(key, option).split() for option in selected_options]
+
+    votes = [{"a":option[0], "b":option[1]} for option in vote_options]
+    
+    data_json = json.dumps({"votes":votes,
                             "voting":context.user_data["voting_id"],
                             "voter":context.user_data["user_id"],
                             "token":context.user_data["token"]})
-    
+        
     vote_response = requests.post(GATEWAY_URL + "store/", data=data_json, headers={"Authorization":f"Token {context.user_data['token']}", "content-type": "application/json"})
     
     if vote_response.status_code == 200:
@@ -219,7 +230,7 @@ def main():
             ENTER_URL: [MessageHandler(Filters.regex(r'^(http[s]?:\/\/)?[A-Za-z0-9\-]+([.][A-Za-z0-9\-]+)*([:][\d]+)?\/booth\/\d+[/]?$'), save_voting_id_by_url_and_ask_username)],
             ASK_USERNAME: [MessageHandler(Filters.text, ask_password)],
             ASK_PASSWORD: [MessageHandler(Filters.text, show_options)],
-            SHOW_OPTIONS: [CallbackQueryHandler(vote, pattern="^\d+$")]
+            SHOW_OPTIONS: [MessageHandler(Filters.regex(r'^\d+(, \d+)*$'), vote)]
         },
         
         fallbacks = [CommandHandler('menu', menu),
